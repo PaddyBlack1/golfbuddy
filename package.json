@@ -1,0 +1,25 @@
+{
+  "name": "golfbuddy-static",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "start": "node server.js"
+  },
+  "description": "",
+  "main": "app.js",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/PaddyBlack1/golfbuddy.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/PaddyBlack1/golfbuddy/issues"
+  },
+  "homepage": "https://github.com/PaddyBlack1/golfbuddy#readme",
+  "dependencies": {
+    "express": "^5.2.1"
+  }
+}
