@@ -119,14 +119,45 @@ function resolveImageUrl(media) {
 
 function normalizePost(raw) {
   const p = raw?.document || raw?.resource || raw?.body || raw;
+
   const courseName =
     p?.courseName ?? p?.CourseName ?? p?.course ?? p?.Course ?? p?.name ?? "Golf Course";
   const description = p?.description ?? p?.Description ?? p?.desc ?? "";
   const userid = p?.userid ?? p?.userId ?? p?.UserId ?? p?.UserID ?? "";
-  const media = p?.media || p?.Media || {};
+
+  // media can come back in different shapes depending on the Logic App / Cosmos document
+    let media =
+    p?.media ??
+    p?.Media ??
+    (p?.imageUrl || p?.blobUrl || p?.url || p?.src
+      ? { imageUrl: p.imageUrl, blobUrl: p.blobUrl, url: p.url, src: p.src }
+      : {});
+
+  // If Logic App stored media as JSON string -> parse
+  if (typeof media === "string") {
+    const s = media.trim();
+    try {
+      media = JSON.parse(s);
+    } catch {
+      // If Logic App stored ONLY blobPath string -> wrap it
+      media = s ? { blobPath: s } : {};
+    }
+  }
+
+  // Clean up blob fields (your output had \n at end)
+  if (media && typeof media === "object") {
+    if (media.blobPath) media.blobPath = String(media.blobPath).trim();
+    if (media.blobName) media.blobName = String(media.blobName).trim();
+  }
+
+
+  
+
   const votes = p?.votes || p?.Votes || {};
+
   return { id: p?.id || p?.postId || p?._id || "", userid, courseName, description, media, votes };
 }
+
 
 function normalizeReview(raw) {
   const r = raw?.document || raw?.resource || raw?.body || raw;
@@ -483,7 +514,7 @@ function renderHomeCards(posts) {
         <div class="img-ph">${imgHtml}</div>
         <div class="desc">${description || "Description"}</div>
         ${userid ? `<div class="meta">User: ${userid}</div>` : ""}
-        ${voteText ? `<div class="meta">${voteText}</div>` : ""}
+        
       </article>
     `;
     })
@@ -632,6 +663,16 @@ async function submitAddReview() {
   await loadReviewsForPost(postid);
 }
 
+function stripCosmosSystemFields(obj) {
+  const out = {};
+  for (const [k, v] of Object.entries(obj || {})) {
+    if (k.startsWith("_")) continue; // _rid, _etag, _ts, _self, _attachments, etc.
+    out[k] = v;
+  }
+  return out;
+}
+
+
 function toggleEditPost() {
   const post = state.postsById.get(state.currentPostId);
   if (!post) return;
@@ -641,6 +682,19 @@ function toggleEditPost() {
 
   state.editing = !state.editing;
   renderDetail(post);
+}
+
+function extractPostDoc(payload) {
+  let d =
+    payload?.document ??
+    payload?.resource ??
+    payload?.body?.document ??
+    payload?.body?.resource ??
+    payload?.body ??
+    payload;
+
+  if (Array.isArray(d)) d = d[0];
+  return d || {};
 }
 
 async function saveEditPost() {
@@ -658,29 +712,78 @@ async function saveEditPost() {
     return;
   }
 
-  const body = {
-    userid: post.userid,
-    id: post.id,
-    courseName,
-    description,
-    media: post.media,
-    votes: post.votes,
-  };
+  // 1) GET existing doc (but safely extract the actual document)
+  const getUrl = buildUrl(POSTS_GET_ONE_BASE, [post.userid, post.id], POSTS_GET_ONE_QS);
+  const g = await httpJson(getUrl, { method: "GET" });
 
-  const url = buildUrl(POSTS_UPDATE_BASE, [post.userid, post.id], POSTS_UPDATE_QS);
-  const r = await httpJson(url, { method: "PUT", body: JSON.stringify(body) });
+  if (!g.ok) {
+    if (note) note.textContent = `Could not load existing post (${g.status}).`;
+    return;
+  }
+
+  const existingRaw = extractPostDoc(g.data);
+  const existing = stripCosmosSystemFields(existingRaw);
+
+  // 2) Build PUT body from existing doc
+  const body = { ...existing };
+
+  // required ids
+  body.id = existingRaw?.id ?? existingRaw?.postId ?? post.id;
+  body.userid = existingRaw?.userid ?? existingRaw?.userId ?? post.userid;
+
+  // overwrite edited fields
+  body.courseName = courseName;
+  body.description = description;
+
+  // 3) FORCE image/media preservation (fallback to cached post.media)
+  const preservedMedia =
+    existingRaw?.media ??
+    existingRaw?.Media ??
+    body.media ??
+    body.Media ??
+    post.media ??
+    null;
+
+  if (preservedMedia) {
+    body.media = body.media ?? preservedMedia;
+    // keep both casings if your Cosmos schema/Logic Apps vary
+    body.Media = body.Media ?? preservedMedia;
+  }
+
+  // also preserve any “flat” image fields if your doc uses them
+  body.imageUrl = body.imageUrl ?? existingRaw?.imageUrl;
+  body.blobUrl  = body.blobUrl  ?? existingRaw?.blobUrl;
+  body.url      = body.url      ?? existingRaw?.url;
+  body.src      = body.src      ?? existingRaw?.src;
+
+  // 4) PUT replace
+  const putUrl = buildUrl(POSTS_UPDATE_BASE, [post.userid, post.id], POSTS_UPDATE_QS);
+  const r = await httpJson(putUrl, { method: "PUT", body: JSON.stringify(body) });
 
   if (!r.ok) {
     if (note) note.textContent = `Failed (${r.status}).`;
     return;
   }
 
-  const updated = { ...post, courseName, description, _displayDescription: null };
-  state.postsById.set(post.id, updated);
+  // 5) Update UI/cache WITHOUT dropping media
+  const updated = {
+    ...post,
+    courseName,
+    description,
+    media: preservedMedia || post.media,
+    _displayDescription: null,
+  };
+
+  state.postsById.set(updated.id, updated);
   state.editing = false;
   renderDetail(updated);
   await loadHomePosts();
+
+  if (note) note.textContent = "Saved.";
 }
+
+
+
 
 document.addEventListener("DOMContentLoaded", () => {
   $("btnRefreshHome")?.addEventListener("click", loadHomePosts);

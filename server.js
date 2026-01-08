@@ -1,3 +1,8 @@
+const appInsights = require("applicationinsights");
+
+appInsights.setup().start();
+
+
 const express = require("express");
 const path = require("path");
 
